@@ -4164,6 +4164,9 @@ input:checked + .slider:before {
 
 <!-- 通话/视频小窗口会动态创建 -->
 
+<!-- ===== 消息推送插件（push-plugin）===== -->
+<script src="https://cdn.jsdelivr.net/npm/push-plugin@1.0.9/dist/push-plugin.min.js"></script>
+
 <script>
 // ========================
 // 第一部分：从第一个代码文件移植的健壮存储逻辑
@@ -5243,27 +5246,41 @@ if (this.dataManager.savePendingLetterId) {
         this.showNotification('聊天记录已加载');
         
         // ===== 初始化推送通知 =====
-        this.initSimpleNotification();
-        console.log('✅ 消息通知已初始化');
+        try {
+            this.initSimpleNotification();
+            console.log('✅ 消息通知已初始化');
+        } catch (e) {
+            console.warn('消息通知初始化失败（不影响其它功能）:', e);
+        }
         // ===== 启动后台保活（Service Worker + 静音音频 + WakeLock）=====
-        this.enableBackgroundKeepAlive();
-        console.log('✅ 后台保活已启动');
+        try {
+            this.enableBackgroundKeepAlive();
+            console.log('✅ 后台保活已启动');
+        } catch (e) {
+            console.warn('后台保活启动失败（不影响其它功能）:', e);
+        }
 
         // 监听 Service Worker 通知点击消息，执行页面内跳转
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.addEventListener('message', (e) => {
-                if (e.data && e.data.type === 'NOTIFICATION_CLICK') {
-                    const data = e.data.data || {};
-                    if (data.type === 'letter') {
-                        this._jumpToLetter();
-                    } else {
-                        this._jumpToChat();
+        // 注意：沙箱 iframe、部分内嵌浏览器里读 navigator.serviceWorker 会抛 SecurityError，
+        // 必须包在 try 里，否则整个初始化会在这里中断
+        try {
+            if (navigator.serviceWorker) {
+                navigator.serviceWorker.addEventListener('message', (e) => {
+                    if (e.data && e.data.type === 'NOTIFICATION_CLICK') {
+                        const data = e.data.data || {};
+                        if (data.type === 'letter') {
+                            this._jumpToLetter();
+                        } else {
+                            this._jumpToChat();
+                        }
                     }
-                }
-            });
+                });
+            }
+        } catch (e) {
+            console.warn('Service Worker 监听绑定失败:', e);
         }
         // ===== 初始化后台保活UI控制器 =====
-        this.initBackgroundKeepAlive();
+        try { this.initBackgroundKeepAlive(); } catch (e) { console.warn('保活UI初始化失败:', e); }
         
         // 7. 自动保存定时器（每30秒）
         setInterval(() => {
@@ -9299,7 +9316,7 @@ const delay = minDelay + Math.random() * (maxDelay - minDelay);
         // 同时发送系统通知
         if (message.includes('对方') || message.includes('回复') || message.includes('发来') || message.includes('收到')) {
             let title = this.appData?.appearanceSettings?.appTitle || this.appData?.otherInfo?.nickname || '梦角爱人';
-            let body = message.length > 30 ? message.substring(0, 30) + '...' : message;
+            let body = message.length > 100 ? message.substring(0, 100) + '...' : message;
             this.sendSimpleNotification(title, body);
         }
     }
@@ -9309,6 +9326,12 @@ const delay = minDelay + Math.random() * (maxDelay - minDelay);
      * 初始化通知系统
      */
     initSimpleNotification() {
+        try {
+            this.pushPlugin = new WebPush('web-push', 'manifest.json');
+        } catch(e) {
+            console.warn('push-plugin 初始化失败，将使用原生 Notification API 降级', e);
+            this.pushPlugin = null;
+        }
         this.updateNotificationStatusUIFromPlugin();
         this.bindNotificationEvents();
     }
@@ -9322,7 +9345,10 @@ const delay = minDelay + Math.random() * (maxDelay - minDelay);
 
         if (requestBtn) {
             requestBtn.addEventListener('click', () => {
-                if ('Notification' in window) {
+                if (this.pushPlugin) {
+                    this.pushPlugin.requestPermission();
+                    setTimeout(() => this.updateNotificationStatusUIFromPlugin(), 500);
+                } else if ('Notification' in window) {
                     Notification.requestPermission().then(() => {
                         setTimeout(() => this.updateNotificationStatusUIFromPlugin(), 300);
                         this.showNotification(Notification.permission === 'granted' ? '通知权限已授予 ✅' : '通知权限被拒绝 ❌');
@@ -9408,7 +9434,17 @@ const delay = minDelay + Math.random() * (maxDelay - minDelay);
             }
         }
 
-        // 2. 最终降级：原生 Notification API（支持 onclick）
+        // 2. 降级：使用 push-plugin
+        if (this.pushPlugin) {
+            try {
+                this.pushPlugin.sendNotification(appTitle, notifBody);
+                return;
+            } catch(e) {
+                console.warn('push-plugin 发送失败，降级到原生 Notification', e);
+            }
+        }
+
+        // 3. 最终降级：原生 Notification API（支持 onclick）
         try {
             const notif = new Notification(appTitle, {
                 body: notifBody,
